@@ -1,6 +1,6 @@
 """
 Amarseba SMS Telegram Bot — Railway (Hardcoded + SQLite on Volume)
-Admin-only API key management via /setkey
+Admin fixed by chat_id — only admin can change API key.
 """
 import os
 import uuid
@@ -11,9 +11,12 @@ import cloudscraper
 from flask import Flask, request, jsonify
 
 # ==================== CONFIG (HARDCODED) ====================
-TELEGRAM_BOT_TOKEN = "8896805760:AAFYDVaKzleuPINa0AjlBSsrbBR8IytO3S0"
+TELEGRAM_BOT_TOKEN = "8896805760:AAG6f5vU_MLuNK3mBTI2Gc74MV6Uds2_1n8"
 AMARSEBA_API_KEY_DEFAULT = "sk-ams-live-Xqoc4Aley0GyV8XbzXjZCdReeePqOrpYSjNP0Cc5k8pnFLLh"
 AMARSEBA_BASE_URL = "https://e-amarseba.com/api/v1"
+
+# ⚠️ এখানে আপনার Telegram chat_id বসান (শুধু সংখ্যা, কোনো @ নয়)
+ADMIN_CHAT_ID = "1700797877,6552783238"
 
 # Railway persistent volume mount path
 DB_PATH = "/data/amarseba.db"
@@ -26,9 +29,8 @@ scraper = cloudscraper.create_scraper(
 )
 
 
-# ---------------- SQLite Storage (Persistent Volume) ----------------
+# ---------------- SQLite Storage ----------------
 def ensure_db():
-    """Create table if not exists. Railway volume mounted at /data."""
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
@@ -82,21 +84,12 @@ def db_del(key):
 
 # ---------------- Config Helpers ----------------
 def get_api_key():
-    """DB-তে সেভ করা key, না থাকলে hardcoded default।"""
     return db_get("api_key") or AMARSEBA_API_KEY_DEFAULT
 
 
-def get_admin_id():
-    return db_get("admin_id")
-
-
-def set_admin_id(chat_id):
-    return db_set("admin_id", str(chat_id))
-
-
 def is_admin(chat_id):
-    aid = get_admin_id()
-    return bool(aid) and str(aid) == str(chat_id)
+    """শুধু hardcoded ADMIN_CHAT_ID-ই admin।"""
+    return str(chat_id) == str(ADMIN_CHAT_ID)
 
 
 def get_headers():
@@ -193,7 +186,6 @@ def handle_update(update):
 
         # ---------- /start, /help ----------
         if text in ("/start", "/help"):
-            admin = is_admin(chat_id)
             base = (
                 "🤖 <b>SAKIB CUSTOM SMS BOT</b>\n\n"
                 "SMS পাঠাতে:\n"
@@ -201,21 +193,13 @@ def handle_update(update):
                 "<b>কমান্ড:</b>\n"
                 "• /balance — ব্যালেন্স\n"
                 "• /id — chat ID\n"
-                "• /whoami — আপনার role\n"
                 "• /debug — সিস্টেম টেস্ট\n"
             )
-            if admin:
+            if is_admin(chat_id):
                 base += (
                     "\n<b>👑 Admin কমান্ড:</b>\n"
                     "• /setkey &lt;api_key&gt; — API key সেট\n"
-                    "• /getkey — বর্তমান key দেখুন\n"
-                    "• /delkey — key মুছুন\n"
-                )
-            elif not get_admin_id():
-                base += (
-                    "\n<b>⚙️ সেটআপ:</b>\n"
-                    "প্রথমবার <code>/setkey &lt;api_key&gt;</code> দিন — "
-                    "আপনি admin হয়ে যাবেন।\n"
+                    "• /delkey — key মুছুন (default-এ ফিরবে)\n"
                 )
             tg_send(chat_id, base)
             return
@@ -225,24 +209,12 @@ def handle_update(update):
             tg_send(chat_id, f"🆔 chat ID: <code>{chat_id}</code>")
             return
 
-        # ---------- /whoami ----------
-        if text == "/whoami":
-            admin_id = get_admin_id()
-            if not admin_id:
-                role = "⚠️ কোনো admin সেট হয়নি"
-            elif str(admin_id) == str(chat_id):
-                role = "👑 Admin"
-            else:
-                role = "👤 User"
-            tg_send(chat_id,
-                f"🆔 chat_id: <code>{chat_id}</code>\n"
-                f"🎭 Role: {role}\n"
-                f"🗄️ Storage: SQLite (Railway Volume)"
-            )
-            return
-
-        # ---------- /setkey (admin only) ----------
+        # ---------- /setkey (ADMIN ONLY) ----------
         if text.startswith("/setkey"):
+            if not is_admin(chat_id):
+                tg_send(chat_id, "⛔ শুধুমাত্র admin API key সেট করতে পারবে।")
+                return
+
             parts = text.split(None, 1)
             if len(parts) < 2:
                 tg_send(chat_id, "ব্যবহার: <code>/setkey sk-ams-live-...</code>")
@@ -251,19 +223,6 @@ def handle_update(update):
             new_key = parts[1].strip()
             if not new_key.startswith("sk-ams-"):
                 tg_send(chat_id, "❌ API key অবশ্যই <code>sk-ams-</code> দিয়ে শুরু হবে।")
-                return
-
-            admin_id = get_admin_id()
-            if not admin_id:
-                # Bootstrap: first /setkey becomes admin
-                if not set_admin_id(chat_id):
-                    tg_send(chat_id, "❌ Admin সেট করা যায়নি। Volume mount করা আছে কি?")
-                    return
-                tg_send(chat_id,
-                    f"👑 আপনি এখন <b>admin</b> (chat_id: <code>{chat_id}</code>)"
-                )
-            elif str(chat_id) != str(admin_id):
-                tg_send(chat_id, "⛔ শুধুমাত্র admin API key সেট করতে পারবে।")
                 return
 
             if db_set("api_key", new_key):
@@ -276,27 +235,8 @@ def handle_update(update):
                 tg_send(chat_id, "❌ সেভ করা যায়নি। Volume mount চেক করুন।")
             return
 
-        # ---------- /getkey (admin only) ----------
-        if text == "/getkey":
-            if not get_admin_id():
-                tg_send(chat_id, "⚠️ এখনো admin সেট হয়নি। /setkey দিয়ে শুরু করুন।")
-                return
-            if not is_admin(chat_id):
-                tg_send(chat_id, "⛔ শুধুমাত্র admin।")
-                return
-            k = get_api_key()
-            src = "SQLite (Volume)" if db_get("api_key") else "Default (hardcoded)"
-            tg_send(chat_id,
-                f"🔑 <b>API Key:</b> <code>{mask_key(k)}</code>\n"
-                f"📦 <b>Source:</b> {src}"
-            )
-            return
-
-        # ---------- /delkey (admin only) ----------
+        # ---------- /delkey (ADMIN ONLY) ----------
         if text == "/delkey":
-            if not get_admin_id():
-                tg_send(chat_id, "⚠️ এখনো admin সেট হয়নি।")
-                return
             if not is_admin(chat_id):
                 tg_send(chat_id, "⛔ শুধুমাত্র admin।")
                 return
@@ -414,7 +354,7 @@ def root():
         "status": "ok",
         "bot": "SAKIB CUSTOM SMS BOT",
         "storage": "sqlite_volume",
-        "admin_set": bool(get_admin_id()),
+        "admin_configured": ADMIN_CHAT_ID != "PASTE_YOUR_CHAT_ID_HERE",
     })
 
 
